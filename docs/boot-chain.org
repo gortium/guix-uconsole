@@ -1,0 +1,185 @@
+#+TITLE: The CM5 boot chain — what actually works, and the traps
+#+DATE: 2026-10-27
+
+Everything here was measured on a uConsole CM5 (eMMC variant) with a 512 MiB
+FAT32 boot partition. Where a widespread belief turned out to be wrong, the
+belief is named so it does not get re-tried.
+
+* The boot method
+
+DIRECT KERNEL BOOT, as REX and nixos-uconsole do it: the CM5 firmware reads
+=config.txt= on the FAT and loads the kernel itself. No u-boot, no extlinux.
+
+Inside Guix the system still has to name a bootloader, and the platform ships
+one for exactly this case: =%direct-kernel-bootloader= from =(rpi bootloader)=,
+with no package, no installer, no configuration file and no menu entries. It
+writes nothing, so `guix system reconfigure' on the card leaves =/boot= alone
+and no =extlinux.conf= appears next to =config.txt=. The real boot layer is the
+platform's =rpi-boot-populate= plus this board's =uconsole/boot/config.txt=,
+which that tool appends to the platform template with =--config-extra=.
+
+Do not reach for =u-boot-bootloader= "because a record is required": it inherits
+=extlinux-bootloader=, so reconfigure writes =/boot/extlinux/extlinux.conf= — a
+second boot configuration the firmware never reads — and =extlinux-bootloader=
+itself drags in =syslinux=, which is x86-only and cannot compile for aarch64
+(=-mregparm=3=).
+
+* What the FAT must carry
+
+| file / dir | why |
+|------------+-----|
+| =config.txt= | =kernel=<name>.img=, =initramfs initrd.img followkernel=, board overlays |
+| =<name>.img= | the kernel =Image= |
+| =initrd.img= | guix's =raw-initrd/initrd.cpio.gz= |
+| =cmdline.txt= | =root=, =gnu.load=, =gnu.system=, =console= |
+| =*.dtb= at the FAT ROOT | the firmware resolves =bcm2712-rpi-cm5-cm5io.dtb= BEFORE the kernel |
+| =overlays/= | =clockworkpi-uconsole-cm5=, =vc4-kms-v3d-pi5=, =audremap= … |
+| =start4*.elf=, =fixup*.dat=, =bootcode.bin= | VideoCore firmware; CM5 does early display/system init |
+
+A FAT with kernel + overlays but no =.dtb= powers on to *nothing at all* — no
+message, no backlight, untouched root. Both working images ship the full DTB
+set; ours keeps them in =<kernel>/dtbs/broadcom/*.dtb=, not
+=<kernel>/dtbs/*.dtb=.
+
+* cmdline.txt: the two tokens nobody documents
+
+#+begin_example
+console=ttyAMA0,115200 console=tty1 loglevel=7 rw root=guix-root rootfstype=ext4 rootwait fsck.repair=yes raid=noautodetect gnu.load=/var/guix/profiles/system/boot gnu.system=/var/guix/profiles/system
+#+end_example
+
+- =gnu.load= — guix's init mounts the root, then executes the boot program it
+  names. Without it: "no boot file passed via 'gnu.load'", a REPL, no system.
+- =gnu.system= — the activation reads it from the cmdline
+  (=boot-time-system= → =find-long-option "gnu.system"=). Without it,
+  =(symlink #f "/run/current-system.new")= dies with =wrong-type-arg … expecting
+  string= and PID 1 exits. guix's own bootloaders pass both; a hand-written
+  =cmdline.txt= must too. Neither token takes leading dashes.
+- Both name the *profile*, never a store path:
+  =gnu.system=/var/guix/profiles/system= and
+  =gnu.load=/var/guix/profiles/system/boot=. A store path pins the card to one
+  generation, and the next =guix system reconfigure= makes it point at a
+  directory the card no longer has — the board mounts its root and has nothing
+  to load. The profile path follows the generation the card actually points at,
+  which is also why the store paths on the build host are not the problem they
+  look like. =rpi-boot-populate= writes these two paths verbatim and *fails*
+  when a =/gnu/store/…= path would reach the command line, so this is enforced,
+  not merely advised.
+- =root=guix-root= works only because guix's init resolves a bare label.
+  It does NOT understand =LABEL== or =PARTUUID== prefixes (it looks for a label
+  literally named "LABEL=guix-root"). =rw= matters: without it ext4 leaves the
+  superblock pristine, so a successful read-only mount is indistinguishable from
+  a boot that never mounted.
+- =console=tty1= LAST makes the panel =/dev/console=.
+
+* FALSIFIED beliefs (do not spend a build or a flash on them)
+
+- *Page size.* Neither page size is forbidden, but only one was observed
+  booting this carrier: the *4 KiB* kernel. A 16 KiB build of the same tree
+  did not come up here. =file -b <Image>= settles which one a payload is.
+- *Kernel file name.* The name follows the page size, and only one name is
+  accepted for each: the 2712 firmware loads a 16 KiB kernel as
+  =kernel_2712.img= and a 4 KiB kernel as =kernel8.img=. "16K boots as
+  =kernel.img=" is wrong — such a card carries a name the firmware does not
+  look for, and it fails with no message.
+- *Boot partition offset.* 1 MiB (sector 2048) and 8 MiB (16384, the vendor's
+  own) were both flashed: identical behaviour. FAT BPB fields, cluster size,
+  MBR bootcode and the active flag were likewise exonerated.
+- *initrd modules for the root.* =mmc_block=, =mmc_core=, =sd_mod=, =ext4= and
+  the eMMC controller =sdhci-brcmstb= are BUILT INTO this kernel, so an empty
+  initrd can mount =/=. The initrd's modules are for the DISPLAY chain.
+- *"The eMMC is the RP1's MMC, so =sdhci-of-dwcmshc= must be in the initrd."*
+  False. Decompile the DTB (=dtc -I dtb -O dts bcm2712-rpi-cm5-cm5io.dtb=):
+  =mmc0= is =soc@107c000000/mmc@fff000=, compatible =brcm,sdhci-brcmstb=,
+  driver =sdhci-brcmstb=, built in. =sdhci-of-dwcmshc= is the RP1's own MMC
+  (=rp1_mmc0/1=).
+
+* initrd: give yourself a console
+
+The panel is the only console this board has, and its power comes from the
+AXP228 over a bit-banged i2c bus, so it cannot show anything before the display
+modules load. Put the chain in =initrd-modules= and fbcon appears on =tty1=:
+
+#+begin_src scheme
+(initrd-modules (list "sdhci-of-dwcmshc" "i2c-gpio"
+                      "axp20x_adc" "axp20x_battery" "axp20x_ac_power" "axp20x_usb_power"
+                      "rp1-fw" "rp1-mailbox" "vc4" "drm-rp1-dsi" "panel-cwu50"
+                      "ocp8178_bl" "backlight" "i2c-bcm2835" "pwm-bcm2835"
+                      "drm_dma_helper" "drm_shmem_helper"))
+#+end_src
+
+Do NOT use =%base-initrd-modules=: it demands =dm-crypt/xts/serpent_generic/wp512=,
+which =bcm2712_defconfig= does not build, so the initrd build fails outright.
+
+Two hard constraints on that list:
+
+- the kernel must be the ZSTD-module variant. guix @1.5's module tooling
+  decompresses =.ko.gz= and =.ko.zst= but feeds =.ko.xz= raw to =parse-elf=
+  ("Invalid ELF"). With XZ modules, any non-empty =initrd-modules= dies.
+- every name must exist as a file in =lib/modules=. Naming a BUILT-IN driver
+  fails the build (=kernel module not found "virtio_blk"=), and this kernel has
+  no virtio and no =pci-host-generic= at all, which is also why QEMU =-M virt=
+  with a virtio disk proves nothing about this image.
+
+* Two failures that look identical and are not
+
+- *No console output at all* → the firmware never loaded the kernel (FAT
+  contents, DTB, =config.txt=).
+- *Kernel and guix's init text on the panel, then a black screen or a REPL* →
+  the kernel ran; the fault is in the cmdline tokens, the initrd modules, or a
+  store path missing from the image.
+
+The cheap witness that separates them: the root's ext4 superblock, read with
+=debugfs -R stats <p2>= on the card. But only when the cmdline carried =rw= —
+see the =rw= note above. =/etc= holding nothing but =mtab= means activation
+never ran; =/run/current-system= existing means it did.
+
+* The USB keyboard needs CONFIG_USB_DWC2_DUAL_ROLE
+
+The internal keyboard and trackball hang off the BCM2712 dwc2 OTG port. A
+kernel built with =CONFIG_USB_DWC2_PERIPHERAL=y= (peripheral only) prints
+
+#+begin_example
+dwc2 1000480000.usb: Configuration mismatch. dr_mode forced to device
+#+end_example
+
+and binds =g_serial=, so the host side never exists and no keyboard can ever
+enumerate. Use =CONFIG_USB_DWC2=y= + =CONFIG_USB_DWC2_DUAL_ROLE=y=; a
+=dtoverlay=dwc2,dr_mode=host= in =config.txt= then selects host mode.
+=usbhid=, =hid-generic= and =dwc2= are all built in, so nothing extra is
+needed in the initrd.
+
+* A boot-layer change never needs a reflash
+
+Everything the firmware reads is on the FAT, and the board mounts it as =/boot=.
+Patch it in place with mtools and reboot:
+
+#+begin_src bash
+sudo env MTOOLS_SKIP_CHECK=1 mcopy -o -i /dev/sdX1 <new-file> ::/file
+sudo env MTOOLS_SKIP_CHECK=1 mdir -i /dev/sdX1 ::/
+#+end_src
+
+=Hidden (N) does not match sectors (M)= is a geometry sanity check, not a
+failure. Reflashing the whole card is only needed when the ROOT filesystem is
+wrong.
+
+* The deployed module tree had no index
+
+One kernel output in this port shipped =lib/modules/<ver>/= with only
+=modules.builtin=, =modules.order= and =modules.builtin.modinfo= — no
+=modules.dep= and no =modules.alias=. Consequence: =modprobe= fails for EVERY
+loadable module in the running system, and udev cannot autoload on hotplug,
+while the initrd still works (it loads its modules with =init_module= straight
+from its own store path). Fix on the build side: install =System.map= at the
+kernel output root so the =linux-module-database= profile hook can run
+=depmod=. This is why =kernel.scm='s install phase copies
+=System.map|Module.symvers= along with the image — do not drop that.
+
+* Why the panel is not a console before userspace
+
+Backlight is a separate chip (=ocp8178_bl=) on its own GPIO, and the panel's
+power comes from the AXP228 over i2c-gpio. "Backlight on" therefore proves
+nothing about the kernel, and the VideoCore firmware cannot drive this custom
+JD9365 panel either (dropping =ignore_lcd= and setting
+=framebuffer_width/height= yields nothing). Rule: a black panel is evidence
+about the display chain only. To read a boot, instrument the initrd or read the
+card.

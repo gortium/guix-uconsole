@@ -1,0 +1,270 @@
+#+TITLE: GNU Guix System for the ClockworkPi uConsole (CM5)
+#+SUBTITLE: the board layer over the Raspberry Pi platform channel
+#+DATE: 2026-11-22
+
+* What this is
+
+A GNU Guix System definition for the [[https://www.clockworkpi.com/][ClockworkPi uConsole]] with a Raspberry
+Pi Compute Module 5 (CM5, eMMC variant). It boots the board from internal eMMC
+with the stock firmware chain — no u-boot, no extlinux — and comes up to a login
+prompt on the built-in panel.
+
+It is deliberately a *base*: kernel, boot chain, network, ssh, and nothing else.
+A compositor, a bar, an editor and their configuration are layers you add
+yourself.
+
+| file                            | what it is                                    |
+|---------------------------------+-----------------------------------------------|
+| =uconsole/kernel.scm=            | Raspberry Pi 6.12.47 downstream kernel, 11 board patches |
+| =uconsole/boot/patches/=         | the 11 kernel patches =uconsole/kernel.scm= applies |
+| =uconsole/system.scm=            | the reference system (bare bones)             |
+| =uconsole/image=                 | the board's disk image, built on the platform's =rpi-image= |
+| =uconsole/boot/config.txt=       | the board half of =config.txt= (overlays, GPIO, USB role) |
+| =.guix-channel= + =channels=      | pinned Guix, nonguix and platform revisions |
+| =examples/boot-critical-stanza.org= | the boot-critical fields, with reasons     |
+| =docs/=                          | measured findings: CM5 boot chain, aarch64 on an x86 host |
+
+That is the whole tree. There is no board *firmware* module here: the radio
+firmware — decompressed BCM43455 WiFi firmware, the BCM4345C0 Bluetooth patch
+file and =regulatory.db= — is =rpi-brcm43455-firmware=, =rpi-bt-firmware= and
+=rpi-regdb-firmware= from the platform's =(rpi firmware)=, which
+=uconsole/system.scm= imports. There is likewise no boot writer and no image
+builder in this repository; both are the platform's.
+
+The kernel carries 11 patches: CWU50/JD9365 DSI panel, AXP228 PMU, OCP8178
+backlight, I2C keyboard/trackball, DSI mode flags, and the DWC2 dual-role fix
+that makes the built-in keyboard and trackball work. Four packages come out of
+one definition: =linux-uconsole= (16K pages, xz modules), =linux-uconsole-4k=,
+=linux-uconsole-4k-zstd= and =linux-uconsole-4k-zstd-console=. There is no 16K
+zstd variant and no 16K console variant: the board runs the 4K kernel (the 16K
+build did not come up on this carrier), and zstd is the only module compression
+Guix's initrd machinery can read.
+
+This repository is a Guix channel and a thin one: the Raspberry Pi platform —
+the kernel constructor, the board-independent firmware, the boot writer and the
+image builder — lives in the =guix-raspberry-pi= channel, declared as a
+dependency in =.guix-channel= and pinned in =channels=. What is here is what is
+true of this carrier: the patches, the .config lines, the display chain, the
+backlight rule, and the board half of =config.txt=.
+
+* Status
+
+Works on hardware:
+
+- direct-kernel boot from eMMC: the firmware reads =config.txt= and
+  =cmdline.txt= from the boot partition, loads =kernel8.img= and =initrd.img=,
+  guix's init mounts the root, and the system reaches a login prompt on the
+  panel;
+- internal keyboard and trackball, WiFi, sshd, USB peripherals;
+
+The port was developed in a single repository and then split: the reusable
+machinery moved to the =guix-raspberry-pi= channel, and this repository kept the
+board. That refactor changes the kernel's derivation — a package's arguments
+embed its builder text — from the same source, patch set and =.config= lines.
+So the tree published here has been evaluated and compared, not flashed; the
+list above describes the build that ran on the card. The first flash of this
+tree is the test.
+- the panel comes up on every boot: the display chain is in the initrd, which is
+  this board's only console (no HDMI, no broken-out UART);
+- firmware for the combo radio is declarative, not hand-copied into
+  =/lib/firmware=: decompressed BCM43455 WiFi firmware, the BCM4345C0 Bluetooth
+  patch blob, and =regulatory.db=.
+
+Not included, on purpose:
+
+- *no desktop packages*: no compositor, no bar, no audio server, no editor. A
+  session is an addition, and the system-side pieces it needs are already here
+  (elogind, backlight permissions, the DSI geometry in the boot stanza);
+- *no prebuilt image and no substitute cache*: build the kernel and the image,
+  or point =--substitute-urls= at a =guix publish= cache that carries them.
+
+Known gaps:
+
+- the root partition must be grown after flashing (the image ships ~5.8 GB of
+  58 GB);
+- the *published history* still carries the boot writer and the image builder
+  that now live in the platform. The tree no longer has them; the rewrite that
+  removes them from every commit is written down, not executed, in
+  =docs/history-rewrite.org=;
+- no public substitute server carries this kernel: first build is 2.5–3 h under
+  qemu on an x86 host.
+
+* Requirements
+
+- uConsole with a *CM5* (eMMC variant). The SD slot is dead on that variant and
+  there is no USB boot: the eMMC is written through =rpiboot=.
+- An x86_64 (or fast aarch64) host with Guix, able to run aarch64 code — see
+  =docs/build-farm.org= for =binfmt_misc= + qemu-user, or build on real aarch64
+  hardware.
+- Raspberry Pi firmware blobs for the boot partition: =start4*.elf=,
+  =fixup*.dat=, =bootcode.bin=, the =.dtb= set and =overlays/=, from a working
+  Pi 5 / CM5 card of the same firmware vintage. The =.dtb=/=overlays/= come
+  from the kernel package; the VideoCore blobs are copied by
+  =rpi-boot-populate --firmware <dir>= when the boot EEPROM does not already
+  carry them.
+
+* Build the kernel
+
+=channels= pins the Guix and nonguix revisions this port is built against. It
+has no =.scm= extension on purpose: a channel's modules are compiled when the
+channel is fetched, and a =channels.scm= at the module root would be compiled as
+a module (`channel` unbound).
+Use it through =time-machine= so the pin applies to one command and your own Guix
+profile stays untouched:
+
+#+begin_src bash
+TM="guix time-machine --channels=channels --"
+$TM build --system=aarch64-linux --substitute-urls=https://bordeaux.guix.gnu.org \
+  -L . -e '(@ (uconsole kernel) linux-uconsole-4k-zstd-console)'
+#+end_src
+
+=--system=aarch64-linux=, never =--target=: with the target flag guix computes a
+different derivation graph and the whole-system build fails. Substitutes cover
+every ordinary package; they cover neither this kernel nor its variants.
+
+The pin does not make the kernel cheap either — no public cache has it. If
+somebody publishes one built at the same pin, add its URL and key:
+
+#+begin_src bash
+$TM build --system=aarch64-linux --substitute-urls="https://bordeaux.guix.gnu.org <cache>" ...
+#+end_src
+
+* Build the image
+
+=uconsole/image= is the board's image expression: it imports =uconsole/system.scm=
+and calls the platform channel's =rpi-image=, so the layout — a 512 MiB FAT32 boot
+partition starting at sector 16384, marked ='boot= and never ='esp=, plus an ext4
+root — is the platform's definition, not a copy of it here.
+
+#+begin_src bash
+$TM system image --system=aarch64-linux \
+  --substitute-urls=https://bordeaux.guix.gnu.org \
+  -L . uconsole/image
+#+end_src
+
+That prints a =/gnu/store/<hash>-disk-image= whose boot partition is *empty on
+purpose*: the kernel, initrd, device trees, overlays and =config.txt= have one
+writer, the platform's =rpi-boot-populate=, and it runs against the partition.
+The initrd is not part of the kernel package; take it from the system's own
+derivation:
+
+#+begin_src bash
+SYS=$($TM system build --system=aarch64-linux -L . uconsole/system.scm)
+$TM build --system=aarch64-linux \
+  "$(grep -o '/gnu/store/[a-z0-9]*-raw-initrd' "$SYS.drv" | head -1).drv"
+# -> /gnu/store/<hash>-raw-initrd/initrd.cpio.gz
+#+end_src
+
+* Fill the boot partition
+
+Flash, mount the FAT partition, and run the platform's tool with this board's
+half of =config.txt=:
+
+#+begin_src bash
+sudo <platform>/rpi-boot-populate /mnt/boot <kernel> \
+  --page-size 4k \
+  --initrd <raw-initrd> \
+  --config-extra uconsole/boot/config.txt \
+  --firmware /path/to/firmware \
+  --console tty1
+#+end_src
+
+=--page-size 4k= is not a preference: the board runs the 4K kernel, and the
+firmware name that goes with 4 KiB pages is =kernel8.img=. (=--page-size 16k=
+would write =kernel_2712.img= instead — the only name the 2712 firmware accepts
+for a 16 KiB kernel — and is not what this board runs.)
+
+-=--initrd= takes the initrd store directory the system's boot parameters name
+  (=/gnu/store/<hash>-raw-initrd=, holding =initrd.cpio.gz=), or that file
+  itself. The tool installs the single file and refuses an empty or ambiguous
+  directory rather than guessing.
+-=--firmware= is the directory holding =start4*.elf=, =fixup*.dat= and
+  =bootcode.bin= (see Requirements); without it the partition carries no
+  VideoCore blobs, which is fine only when the boot EEPROM already has them.
+
+The tool writes the kernel, the initrd, the overlays, the base DTBs, the
+=firmware blobs= when =--firmware= is given, =config.txt= and =cmdline.txt= in
+one pass. =config.txt= becomes the platform template, then the =kernel= and
+=initramfs= lines (which only that tool writes, and which are global settings,
+so they are written before any board section), then =uconsole/boot/config.txt=
+— the board's overlays, GPIO levels, audio pins and USB role. It refuses to continue when
+something the firmware needs is missing, because every one of those inputs is a
+way to boot into a black screen with nothing to read.
+
+* Flash and first boot
+
+#+begin_src bash
+sudo /path/to/usbboot/rpiboot -d mass-storage-gadget64
+lsblk -o NAME,SIZE,TRAN,MODEL,SERIAL      # find the eMMC, ~58 GB, TRAN usb
+ls -l /dev/disk/by-id/usb-mmcblk0_*       # use the by-id path, never sdX
+sudo dd if=<image> of=/dev/disk/by-id/<id> bs=4M status=progress conv=fsync
+#+end_src
+
+Power from the battery for the first boot, not from a live USB host: the AXP228
+can latch an interrupt storm when the cable sits in a running host and the boot
+freezes before userspace.
+
+Expected on first boot: the panel lights, the kernel starts, the init mounts the
+root, and you get =uConsole login:= on the panel. No greeter, no auto-login.
+Log in as the account declared in =uconsole/system.scm= and set a password with
+=passwd=; connect the network with =nmtui=. Then grow the root filesystem:
+
+#+begin_src bash
+lsblk                                    # confirm the root device
+sudo parted /dev/mmcblk0 -- resizepart 2 100%
+sudo partprobe /dev/mmcblk0
+sudo resizefs 2>/dev/null || sudo resize2fs /dev/mmcblk0p2
+df -h /
+#+end_src
+
+* Why a plain Guix config does not boot this board
+
+1. *The initrd must carry the display chain.* The panel and its regulators are
+   modules, and the panel is the only console there is. Put them in
+   =initrd-modules= with the zstd-module kernel (guix's initrd machinery cannot
+   read =.ko.xz=) and =console=tty1= last on the cmdline.
+2. *The base DTBs must be on the boot partition.* The firmware resolves
+   =bcm2712-rpi-cm5-cm5io.dtb= from the FAT before it loads the kernel. Kernel
+   and overlays without the =.dtb= set: power on, nothing at all.
+3. *=gnu.load= and =gnu.system= must name something that exists.* A guix initrd
+   mounts the root and then executes the boot program named by =gnu.load=; with
+   no =gnu.load= it prints "no boot file passed via 'gnu.load'", opens a REPL,
+   and the system never starts. On a board with no console that is
+   indistinguishable from a dead kernel.
+
+The full reasoning, and the traps that make a healthy boot look dead, are in
+=docs/boot-chain.org=.
+
+* Using this as a base
+
+=uconsole/system.scm= is the file the image builder loads: copy it and edit it,
+or take the boot-critical fields from =examples/boot-critical-stanza.org= and
+graft them onto a system of your own. The kernel package and the platform's
+firmware packages are plain Guix packages, usable through =-L .= or as a
+channel:
+
+#+begin_src scheme
+(channel
+ (name 'uconsole)
+ (url "https://github.com/gortium/guix-uconsole.git")
+ (branch "main")
+ (commit "<sha>"))     ; a branch is not a version: pin the commit
+#+end_src
+
+Consuming it also fetches its own dependency, =guix-raspberry-pi=; the pin is in
+=.guix-channel=, so there is nothing to add by hand.
+
+* Provenance and license
+
+The kernel patches 0001–0007 come from the ClockworkPi and Raspberry Pi
+community kernel trees (ak-rex's ClockworkPi apt kernel, NovKernel, the REX
+image). Patches 0008–0011 — the DCS panel fixes without which the CWU50 stays
+dark — and the Guix code, scripts and documentation here were written for this
+port. See =NOTICE= for the details.
+
+=GPL-3.0-or-later= for the Guix code, scripts and documentation; the kernel
+patches stay =GPL-2.0-only=, inherited from =raspberrypi/linux=. Full text in
+=LICENSE=.
+
+Nothing here is affiliated with ClockworkPi, Raspberry Pi Ltd or the GNU Guix
+project.

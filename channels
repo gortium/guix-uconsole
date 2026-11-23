@@ -1,0 +1,71 @@
+;; channels — the pin this port was built and validated with.
+;;
+;; NO .scm EXTENSION, on purpose. This repository is a Guix channel (its modules
+;; are uconsole/*.scm), and a channel's modules are COMPILED when the channel is
+;; fetched. A file named channels.scm at the module root is then compiled as a
+;; module too, and `(list (channel …))` has no binding for `channel` at compile
+;; time: the checkout fails with "Unbound variable: channel" before anything
+;; else runs. Without the extension, Guix never treats it as a module.
+;;
+;; Why pinned at all: a substitute is only usable when the client computes the
+;; SAME derivation, and that depends on the exact Guix and nonguix revisions.
+;; Pull HEAD and the prebuilt kernel you were given misses; then the board tries
+;; to compile Linux on a handheld.
+;;
+;;   guix de069958f  — the revision whose derivations match the published kernel
+;;   nonguix 6c2d4c8 — REQUIRED: (nongnu packages linux) provides linux-firmware
+;;                     (brcmfmac WiFi, shipped as .bin.zst) used by
+;;                     uconsole/system.scm and by (rpi firmware)
+;;
+;; Use it for one command without touching your own Guix:
+;;   guix time-machine --channels=channels -- system build \
+;;        --system=aarch64-linux uconsole/system.scm
+;;
+;; Refresh deliberately, never by accident: `guix describe -f channels' after a
+;; pull, commit the new hashes, and REBUILD THE KERNEL. A channel bump changes
+;; the kernel's store hash even when nothing in kernel.scm moved.
+;;
+;; guix-raspberry-pi 9c31e14 — the platform: kernel constructor, no-op bootloader
+;;                     record, firmware, boot writer, image builder. Required like
+;;                     nonguix: (uconsole kernel) imports (rpi kernel),
+;;                     (uconsole system) imports (rpi bootloader), and
+;;                     (uconsole image) imports (rpi image). Must name the SAME
+;;                     commit as .guix-channel.
+;;
+;; A developer testing a local checkout of the platform replaces its URL with
+;; file:///path/to/guix-raspberry-pi and leaves the commit alone; the platform
+;; must be committed there for time-machine to read it.
+
+(list (channel
+       (name 'guix)
+       (url "https://git.guix.gnu.org/guix.git")
+       (branch "master")
+       (commit "de069958fcf9050be92a4085c31b9738ca4ff912")
+       (introduction
+        (make-channel-introduction
+         "9edb3f66fd807b096b48283debdcddccfea34bad"
+         (openpgp-fingerprint
+          "BBB0 2DDF 2CEA F6A8 0D1D  E643 A2A0 6DF2 A33A 54FA"))))
+      (channel
+       (name 'nonguix)
+       (url "https://gitlab.com/nonguix/nonguix.git")
+       (branch "master")
+       (commit "6c2d4c89947e4fa381c896a204ee6bc5e81a7b8d")
+       ;; Authenticated updates: without this introduction `guix pull' warns
+       ;; "channel 'nonguix' lacks an introduction and cannot be authenticated"
+       ;; and cannot verify that the commit it fetched is genuine. The values are
+       ;; nonguix's own, published in its news.txt ("Nonguix authenticated
+       ;; updates"); 897c1a4 is an ancestor of the pin above.
+       (introduction
+        (make-channel-introduction
+         "897c1a470da759236cc11798f4e0a5f7d4d59fbc"
+         (openpgp-fingerprint
+          "2A39 3FFF 68F4 EF7A 3D29  12AF 6F51 20A0 22FB B2D5"))))
+      ;; The platform channel. No introduction: it is unsigned, and guix only
+      ;; authenticates a channel that declares one — a wrong introduction here
+      ;; would refuse the pin instead of merely warning about it.
+      (channel
+       (name 'guix-raspberry-pi)
+       (url "https://github.com/gortium/guix-raspberry-pi.git")
+       (branch "main")
+       (commit "9c31e14336df31dd2a27625e094253d5552ed4cf")))

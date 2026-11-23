@@ -1,0 +1,85 @@
+#+TITLE: Building aarch64 Guix for a handheld: use a bigger host
+#+DATE: 2026-10-27
+
+The CM5 is a 4-core Cortex-A76 with 4–8 GB. Compiling a kernel on it is hours of
+battery and heat, and a desktop closure is worse. The usual arrangement is
+therefore: a machine with more cores builds, and the board only substitutes. If
+nothing substitutes, the board can still build — slowly, and with a warning.
+
+* Build with --system, never --target
+
+#+begin_src bash
+guix build --system=aarch64-linux --substitute-urls=https://bordeaux.guix.gnu.org \
+  -L . -e '(@ (uconsole kernel) linux-uconsole-4k-zstd-console)'
+#+end_src
+
+- =--system=aarch64-linux= means "native, for that machine": the host must be
+  able to execute aarch64 code. On x86_64 that is binfmt_misc + qemu-user
+  (=boot.binfmt.emulatedSystems= on NixOS, =update-binfmts= elsewhere), and
+  after that the whole aarch64 substitute cache on bordeaux is reachable — every
+  package that is not this custom kernel downloads instead of compiling.
+- =--target=aarch64-linux-gnu= (true cross) is what you want ONLY to iterate a
+  package cheaply: the kernel compiles in ~20 min cross instead of ~3 h native.
+  But the whole-system image cross build was broken here (guix master:
+  =instantiate-missing-services → append: Wrong type argument: #f=), and cross
+  and native results live under different hashes, so a cross-built kernel is
+  dead weight to a native image.
+- qemu has one flag requirement in the kernel package: =CROSS_COMPILE= must come
+  from the phase's =target= keyword (empty for native). Hardcoding
+  =CROSS_COMPILE=aarch64-linux-gnu-= works for =--target= and breaks native
+  ("aarch64-linux-gnu-gcc: not found").
+- Give the kernel ~3 h of wall clock, and never quote a shorter estimate for a
+  config-only rebuild on a loaded machine.
+
+* Serve what you built
+
+Custom kernels exist on no public mirror. =guix publish= plus
+=guix archive --authorize= turns your build host into a substitute server:
+
+#+begin_src bash
+guix publish --port=8095 --cache=/var/cache/guix/publish
+curl -s http://HOST:8095/$(basename <store-item> | cut -c1-32).narinfo | grep Signature
+#+end_src
+
+A narinfo WITHOUT a =Signature:= line means the publisher is not signing, and
+every client will refuse the download. On the client, both halves are needed:
+
+#+begin_src scheme
+(guix-configuration
+  (substitute-urls '("http://HOST:8095" "https://bordeaux.guix.gnu.org"))
+  (authorized-keys (append (list (local-file "farm-publish.pub"))
+                           %default-authorized-guix-keys)))
+#+end_src
+
+Pass BOTH key sets — the field replaces the default, so naming only your own key
+silently drops the distro keys and bordeaux stops working. An uninitialized
+=/etc/guix/acl= (content literally =(acl)=) is why "ACL for archive imports
+seems to be uninitialized" appears and nothing can be imported from anywhere.
+
+* Ship the delta when the store cannot be shared
+
+If the client's guix is a different commit than yours, the same package has a
+different store hash and every substitute misses. Then either align the
+channels, or stream only the closure difference:
+
+#+begin_src bash
+guix gc -R <new-system> | sed 's|/gnu/store/||' | sort > new.txt
+ssh board 'ls /gnu/store' | sort > old.txt
+comm -23 new.txt old.txt > delta.txt
+tar -C /gnu/store -cf - $(tr '\n' ' ' < delta.txt) | ssh board 'sudo tar -x -C /gnu/store -f -'
+#+end_src
+
+Match with =comm=, never by eye: a closure is ~1000 items and one missing item
+shows up as a system that mounts its root and then cannot find =/etc=.
+
+* Pin what is expensive
+
+A raw image is several GB and an aarch64 closure re-download is hours. Guix
+garbage-collects anything no profile or gc-root references — including your
+freshly built image. Pin it the moment it lands:
+
+#+begin_src bash
+sudo ln -sfn /gnu/store/<hash>-disk-image /var/guix/gcroots/custom/uconsole-image
+#+end_src
+
+And never run =guix gc= without deciding, explicitly, what may disappear.

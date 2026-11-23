@@ -1,0 +1,36 @@
+;;; uconsole/image — the uConsole's disk image, built by the platform's builder.
+;;;
+;;; Build:  guix system image -L . uconsole/image
+;;; Flash:  dd to the eMMC, then mount the FAT partition and run the platform's
+;;;         rpi-boot-populate against it with this board's config.txt section
+;;;         (--config-extra uconsole/boot/config.txt). The image ships an empty
+;;;         boot partition on purpose: the kernel, initrd, device trees and
+;;;         overlays have one writer, and it runs after flashing.
+;;;
+;;; Nothing about the layout is decided here. Sizes, offsets and file-system
+;;; types come from (rpi image): a 512 MiB FAT32 partition at sector 16384,
+;;; marked 'boot and never 'esp, and an ext4 root. This file only says which
+;;; system goes on the root and which labels it must carry — the two names the
+;;; system's own file-systems and the boot writer's cmdline agree on.
+;;;
+;;; PAGE SIZE. The kernel this board runs is the 4K variant (uconsole kernel),
+;;; so the firmware name is kernel8.img and the boot writer is called with
+;;; --page-size 4k. A 16K build of the same tree would be kernel_2712.img; the
+;;; two names are not interchangeable and the firmware reports neither.
+;;;
+;;; This is a module with define-module, like every other file under this
+;;; channel: `guix system image' loads it and takes its last value, while the
+;;; channel compiler would reject a bare script here.
+
+(define-module (uconsole image)
+  #:use-module (uconsole system)
+  #:use-module (rpi image))
+
+(rpi-image
+ #:os uconsole-system
+ ;; Both labels are referenced by name elsewhere: guix's initrd resolves
+ ;; (file-system-label "guix-root") from the uconsole/system.scm file-systems,
+ ;; and the boot writer's cmdline carries root=guix-root. Changing one here
+ ;; without the changes below produces a card that mounts nothing.
+ #:boot-label "guix-boot"
+ #:root-label "guix-root")

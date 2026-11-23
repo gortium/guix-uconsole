@@ -1,0 +1,63 @@
+# The uConsole's half of config.txt.
+#
+# This file describes the carrier and nothing else: the panel overlay, the audio
+# pins, the USB role, the antenna select, the PCIe state and the GPIO levels the
+# keyboard and trackpad are wired to. The platform half — arm_64bit, the
+# firmware's own UART, os_check, the framebuffer defaults — lives in the
+# platform tool's template (rpi/boot/config.txt in guix-raspberry-pi) and is
+# written first.
+#
+# Install it with the boot writer, which appends it after the platform template
+# and then adds kernel= and initramfs itself:
+#
+#   rpi-boot-populate /run/media/<card>/boot <kernel> \
+#     --page-size 4k --initrd <raw-initrd>/initrd.cpio.gz \
+#     --config-extra uconsole/boot/config.txt --console tty1
+#
+# The firmware applies later settings last, so a key repeated here overrides the
+# platform value; a section is only applied when the board it names matches.
+# There is NO kernel= and NO initramfs line in this file: one writer owns those.
+
+[all]
+# The firmware must not try to drive the panel. This carrier's display is a
+# JD9365 DSI panel behind the clockworkpi overlay, brought up by the kernel's
+# panel driver; the firmware's own LCD path cannot drive it, and leaving it on
+# costs boot time and produces a wrong mode on tty1.
+ignore_lcd=1
+
+# Audio leaves the SoM on GPIO 12/13 and is routed there by the audremap
+# overlay. Without both lines the internal speaker and headphone jack stay
+# silent, and nothing in the boot log says so.
+dtparam=audio=on
+dtoverlay=audremap,pins_12_13
+
+# The internal keyboard, the trackpad and the USB ports hang off the BCM2712
+# dwc2 OTG port. Host mode is selected here rather than in the kernel: the same
+# kernel image also serves the USB-C console, which needs the peripheral role.
+dtoverlay=dwc2,dr_mode=host
+
+# Internal antenna. The uConsole has no external antenna connector, and without
+# this the radio uses ant1 and receives nothing usable.
+dtparam=ant2
+
+[pi5]
+# The carrier's device tree overlay: the panel, the AXP228 regulators on the
+# bit-banged i2c bus, the keyboard and trackpad matrix, the backlight chip.
+dtoverlay=clockworkpi-uconsole-cm5
+
+# Mesa's vc4 driver on the HVS, with 384 MiB of CMA for the framebuffer. The
+# platform default (max_framebuffers=2) is not enough on this panel's mode
+# without the CMA pool.
+dtoverlay=vc4-kms-v3d-pi5,cma-384
+
+# The header UART is UART0 on this carrier, and the PCIe port is not wired: with
+# it enabled the firmware spends boot time probing a link that has nothing on
+# it.
+dtparam=uart0
+dtparam=pciex1=off
+
+# GPIO 10 is the keyboard/trackpad interrupt (input, no pull) and GPIO 11 holds
+# the backlight enable line high. Both are set here so the panel is not dark for
+# the seconds between the firmware handover and the driver's own probe.
+gpio=10=ip,np
+gpio=11=op,dh

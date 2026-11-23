@@ -1,0 +1,53 @@
+NOTICE — provenance of the contents of this repository
+======================================================
+
+Kernel patches (uconsole/boot/patches/*.patch)
+---------------------------------------------
+
+0001-configs.patch
+0002-panel.patch
+0003-power.patch
+0004-backlight.patch
+0005-overlays.patch
+0006-bcm2835-staging.patch
+0007-simple-switch.patch
+
+    Derived from the ClockworkPi / Raspberry Pi community kernel trees
+    (ak-rex's ClockworkPi apt kernel, NovKernel, and the REX image firmware),
+    which in turn derive from Raspberry Pi's downstream rpi-6.12.y tree.
+    Those trees ship no per-patch authorship headers, so individual authors
+    cannot be named here. Upstream origin: https://github.com/raspberrypi/linux
+    and the ClockworkPi community kernel repositories.
+
+0008-panel-cwu50-dcs-detect.patch
+0009-panel-cwu50-page-select.patch
+0010-panel-cwu50-dsi-init0.patch
+0011-panel-cwu50-dsi-mode-flags.patch
+
+    Written for this port. Without these the CWU50 (JD9365) panel stays dark
+    even with the vendor patches applied.
+
+Guix code (uconsole/*.scm, uconsole/image)
+-----------------------------------------
+
+    Written for this port, 2026.
+
+Documentation (README.org, docs/*.org, examples/*.org)
+------------------------------------------------------
+
+    Written for this port, 2026, from measurements on real hardware.
+
+Trademarks
+----------
+
+ClockworkPi and uConsole are trademarks of their owners; Raspberry Pi and CM5
+likewise. Nothing here is affiliated with, endorsed by, or supported by
+ClockworkPi, Raspberry Pi Ltd, or the GNU Guix project.
+
+License
+-------
+
+Everything in this repository is GPL-3.0-or-later (see LICENSE), except the
+kernel patches under uconsole/boot/patches/, which derive from
+raspberrypi/linux and remain GPL-2.0-only. Their original licensing is not
+changed by inclusion here, and no additional restriction is placed on them.

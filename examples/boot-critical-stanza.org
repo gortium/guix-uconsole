@@ -1,0 +1,104 @@
+#+TITLE: The boot-critical part of operating-system
+#+DATE: 2026-10-27
+
+Copy these fields into your own =system.scm=. The rest of a Guix System
+definition is ordinary; what is below is what this board is picky about. Each
+choice carries its reason, because most of them look arbitrary and are not.
+
+* Required modules
+
+#+begin_src scheme
+(define-module (my uconsole)
+  #:use-module (gnu)
+  #:use-module (gnu system file-systems)
+  #:use-module (gnu bootloader)
+  #:use-module (rpi bootloader)            ; %direct-kernel-bootloader
+  #:use-module (gnu services)
+  #:use-module (gnu packages firmware)     ; linux-firmware (WiFi/BT)
+  #:use-module (nongnu packages linux)     ; nonguix channel
+  #:use-module (uconsole kernel)           ; this repo, with -L . on the load path
+  #:use-module (rpi firmware))
+#+end_src
+
+* Kernel
+
+#+begin_src scheme
+;; 4K pages + ZSTD modules + the USB gadget serial console compiled in.
+;; - 4K: what REX and nixos-uconsole run; it is also what the 4K defconfig
+;;   fragment targets (a 16K build would need CONFIG_ARM64_16K_PAGES and a
+;;   47-bit VA).
+;; - zstd: guix 1.5's initrd tooling cannot parse .ko.xz, so ANY non-empty
+;;   initrd-modules requires the zstd variant.
+;; - console: this board has no UART and no HDMI. Revert to
+;;   linux-uconsole-4k-zstd for a release build once you trust the boot.
+(kernel linux-uconsole-4k-zstd-console)
+#+end_src
+
+* initrd modules — the display chain, not the root
+
+#+begin_src scheme
+;; The eMMC controller (sdhci-brcmstb), mmc_block/mmc_core/sd_mod and ext4 are
+;; BUILT IN, so the root mounts with an empty initrd. What needs modules is the
+;; PANEL: it is powered by the AXP228 over a bit-banged i2c bus, and its DSI
+;; bridge sits behind the RP1. With these, fbcon comes up on tty1 early enough
+;; to read kernel messages.
+;; Never use %base-initrd-modules here: it demands dm-crypt/xts/serpent_generic
+;; /wp512, which bcm2712_defconfig does not build.
+(initrd-modules (list "sdhci-of-dwcmshc"
+                      "i2c-gpio"
+                      "axp20x_adc" "axp20x_battery" "axp20x_ac_power" "axp20x_usb_power"
+                      "rp1-fw" "rp1-mailbox"
+                      "vc4" "drm-rp1-dsi" "panel-cwu50" "ocp8178_bl"
+                      "backlight" "i2c-bcm2835" "pwm-bcm2835"
+                      "drm_dma_helper" "drm_shmem_helper"))
+#+end_src
+
+* File systems — labels are the contract
+
+#+begin_src scheme
+(file-systems
+ (append
+  (list (file-system
+          (device (file-system-label "guix-root"))
+          (mount-point "/")
+          (type "ext4"))
+        (file-system
+          (device (file-system-label "guix-boot"))
+          (mount-point "/boot")
+          (type "vfat")))
+  %base-file-systems))
+#+end_src
+
+The flashed root must carry the label (=e2label /dev/sdX2 guix-root=) and the FAT
+the platform's boot writer addresses uses =guix-boot= — both are the defaults of
+=rpi-image= and =rpi-boot-populate=. guix's initrd resolves a BARE label;
+=root=LABEL=guix-root= would look for a label literally named that.
+
+* Bootloader
+
+#+begin_src scheme
+;; The real boot is the firmware reading config.txt from the FAT (direct kernel
+;; boot), so nothing must be installed. %direct-kernel-bootloader is the
+;; platform's no-op record: no package, no installer, no configuration file, no
+;; menu entries, so reconfigure writes nothing under /boot.
+;; Do not use u-boot-bootloader: it inherits extlinux-bootloader and leaves
+;; /boot/extlinux/extlinux.conf behind — a second boot configuration the
+;; firmware ignores — and extlinux itself needs syslinux, which is x86-only.
+(bootloader (bootloader-configuration
+              (bootloader %direct-kernel-bootloader)
+              (targets '("/dev/mmcblk0"))))
+#+end_src
+
+* then
+
+#+begin_src bash
+guix system image --system=aarch64-linux -L . uconsole/image
+sudo <platform>/rpi-boot-populate /mnt/boot <kernel> \
+  --page-size 4k --initrd <raw-initrd> \
+  --config-extra uconsole/boot/config.txt --firmware /path/to/firmware \
+  --console tty1
+#+end_src
+
+Read =docs/boot-chain.org= before the first boot: the two cmdline tokens
+(=gnu.load=, =gnu.system=) and the base DTBs decide whether the board shows
+anything at all.
